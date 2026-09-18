@@ -877,6 +877,8 @@ static int __init init_sched_debug_procfs(void)
 
 __initcall(init_sched_debug_procfs);
 
+#define __PS(S, F) \
+	SEQ_printf(m, "%-45s:%21Ld\n", S, (long long)(F))
 #define __P(F) \
 	SEQ_printf(m, "%-45s:%21Ld\n", #F, (long long)F)
 #define P(F) \
@@ -1033,6 +1035,14 @@ void proc_sched_show_task(struct task_struct *p, struct seq_file *m)
 	P(se.avg.util_est.ewma);
 	P(se.avg.util_est.enqueued);
 #endif
+#ifdef CONFIG_UCLAMP_TASK
+	rcu_read_lock();
+	__PS("uclamp.min", p->uclamp_req[UCLAMP_MIN].value);
+	__PS("uclamp.max", p->uclamp_req[UCLAMP_MAX].value);
+	__PS("effective uclamp.min", uclamp_eff_value(p, UCLAMP_MIN));
+	__PS("effective uclamp.max", uclamp_eff_value(p, UCLAMP_MAX));
+	rcu_read_unlock();
+#endif
 	P(policy);
 	P(prio);
 #undef PN_SCHEDSTAT
@@ -1041,6 +1051,7 @@ void proc_sched_show_task(struct task_struct *p, struct seq_file *m)
 #undef P_SCHEDSTAT
 #undef P
 #undef __P
+#undef __PS
 
 	{
 		unsigned int this_cpu = raw_smp_processor_id();

@@ -1664,6 +1664,36 @@ static int cgroup_show_path(struct seq_file *sf, struct kernfs_node *kf_node,
 	return len;
 }
 
+static int parse_cgroup2_options(char *data, unsigned int *root_flags)
+{
+	char *token;
+
+	*root_flags = 0;
+	while ((token = strsep(&data, ",")) != NULL) {
+		if (!*token)
+			continue;
+		if (!strcmp(token, "memory_recursiveprot")) {
+			*root_flags |= CGRP_ROOT_MEMORY_RECURSIVE_PROT;
+			continue;
+		}
+		pr_err("cgroup2: unknown option \"%s\"\n", token);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+/* Called with cgroup_mutex held. */
+static void apply_cgroup2_flags(unsigned int root_flags)
+{
+	if (current->nsproxy->cgroup_ns != &init_cgroup_ns)
+		return;
+
+	if (root_flags & CGRP_ROOT_MEMORY_RECURSIVE_PROT)
+		cgrp_dfl_root.flags |= CGRP_ROOT_MEMORY_RECURSIVE_PROT;
+	else
+		cgrp_dfl_root.flags &= ~CGRP_ROOT_MEMORY_RECURSIVE_PROT;
+}
+
 static int cgroup_show_options(struct seq_file *seq,
 			       struct kernfs_root *kf_root)
 {
@@ -1681,6 +1711,8 @@ static int cgroup_show_options(struct seq_file *seq,
 		seq_puts(seq, ",xattr");
 	if (root->flags & CGRP_ROOT_CPUSET_V2_MODE)
 		seq_puts(seq, ",cpuset_v2_mode");
+	if (root->flags & CGRP_ROOT_MEMORY_RECURSIVE_PROT)
+		seq_puts(seq, ",memory_recursiveprot");
 
 	spin_lock(&release_agent_path_lock);
 	if (strlen(root->release_agent_path))
@@ -1850,8 +1882,13 @@ static int cgroup_remount(struct kernfs_root *kf_root, int *flags, char *data)
 	u16 added_mask, removed_mask;
 
 	if (root == &cgrp_dfl_root) {
-		pr_err("remount is not allowed\n");
-		return -EINVAL;
+		ret = parse_cgroup2_options(data, &opts.flags);
+		if (ret)
+			return ret;
+		mutex_lock(&cgroup_mutex);
+		apply_cgroup2_flags(opts.flags);
+		mutex_unlock(&cgroup_mutex);
+		return 0;
 	}
 
 	cgroup_lock_and_drain_offline(&cgrp_dfl_root.cgrp);
@@ -2137,10 +2174,10 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
 		cgroup_enable_task_cg_lists();
 
 	if (is_v2) {
-		if (data) {
-			pr_err("cgroup2: unknown option \"%s\"\n", (char *)data);
+		ret = parse_cgroup2_options(data, &opts.flags);
+		if (ret) {
 			put_cgroup_ns(ns);
-			return ERR_PTR(-EINVAL);
+			return ERR_PTR(ret);
 		}
 		cgrp_dfl_visible = true;
 		root = &cgrp_dfl_root;
@@ -2308,6 +2345,12 @@ out_mount:
 		nsdentry = kernfs_node_dentry(cgrp->kn, dentry->d_sb);
 		dput(dentry);
 		dentry = nsdentry;
+	}
+
+	if (!IS_ERR(dentry) && is_v2) {
+		mutex_lock(&cgroup_mutex);
+		apply_cgroup2_flags(opts.flags);
+		mutex_unlock(&cgroup_mutex);
 	}
 
 	if (IS_ERR(dentry) || !new_sb)
@@ -7370,3 +7413,46 @@ struct cgroup_subsys debug_cgrp_subsys = {
 	.legacy_cftypes = debug_files,
 };
 #endif /* CONFIG_CGROUP_DEBUG */
+
+
+static u64 power_of_ten(int power)
+{
+	u64 v = 1;
+	while (power--)
+		v *= 10;
+	return v;
+}
+
+/**
+ * cgroup_parse_float - parse a floating number
+ * @input: input string
+ * @dec_shift: number of decimal digits to shift
+ * @v: output
+ *
+ * Parse a decimal floating point number in @input and store the result in
+ * @v with decimal point right shifted @dec_shift times.  For example, if
+ * @input is "12.3456" and @dec_shift is 3, *@v will be set to 12345.
+ * Returns 0 on success, -errno otherwise.
+ *
+ * There's nothing cgroup specific about this function except that it's
+ * currently the only user.
+ */
+int cgroup_parse_float(const char *input, unsigned dec_shift, s64 *v)
+{
+	s64 whole, frac = 0;
+	int fstart = 0, fend = 0, flen;
+
+	if (!sscanf(input, "%lld.%n%lld%n", &whole, &fstart, &frac, &fend))
+		return -EINVAL;
+	if (frac < 0)
+		return -EINVAL;
+
+	flen = fend > fstart ? fend - fstart : 0;
+	if (flen < dec_shift)
+		frac *= power_of_ten(dec_shift - flen);
+	else
+		frac = DIV_ROUND_CLOSEST_ULL(frac, power_of_ten(flen - dec_shift));
+
+	*v = whole * power_of_ten(dec_shift) + frac;
+	return 0;
+}

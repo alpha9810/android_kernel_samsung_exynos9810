@@ -133,9 +133,13 @@ unsigned int calculate_energy(struct task_struct *p, int target_cpu)
 		 *    utilization. Find biggest utilization in the coregroup
 		 *    to know what capacity the cpu will have.
 		 */
-		for_each_cpu(i, cpu_coregroup_mask(cpu))
-			if (util[i] > max_util)
-				max_util = util[i];
+		for_each_cpu(i, cpu_coregroup_mask(cpu)) {
+			unsigned long freq_util;
+
+			freq_util = uclamp_rq_util_with(cpu_rq(i), util[i],
+					i == target_cpu ? p : NULL);
+			max_util = max(max_util, freq_util);
+		}
 
 		/*
 		 * 2. Find the capacity according to biggest utilization in
@@ -213,6 +217,7 @@ static int find_min_util_cpu(const struct cpumask *mask, struct task_struct *p)
 		unsigned long new_util = ml_task_attached_cpu_util(cpu, p);
 
 		new_util = max(new_util, ml_boosted_task_util(p));
+		new_util = uclamp_rq_util_with(cpu_rq(cpu), new_util, p);
 		/* Skip over-capacity cpu */
 		if (new_util >= capacity_orig)
 			continue;
